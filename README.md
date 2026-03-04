@@ -43,7 +43,7 @@ The original motivation remains: running a local large model is resource-heavy a
 
 ## Installation
 
-Follow the same steps as [CustomDancePlayer](https://github.com/maoxig/MateEngine-CustomDancePlayer?tab=readme-ov-file#installation-steps) — the only difference is the DLL name.
+Follow the same steps as [CustomDancePlayer](https://github.com/maoxig/MateEngine-CustomDancePlayer?tab=readme-ov-file#installation-steps) — the only difference is the DLL name. The .me file is still needed from [maoxig's v0.0.2 release](https://github.com/maoxig/MateEngine-CustomLLMAPI/releases/tag/v0.0.2) you have to still load that mod from within MateEngine. 
 
 ---
 
