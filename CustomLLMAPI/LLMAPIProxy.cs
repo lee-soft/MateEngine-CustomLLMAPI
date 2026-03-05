@@ -450,66 +450,36 @@ namespace LLMUnity
             {
                 string cleaned = block.Replace("<|im_end|>", "").Trim();
 
-                // Detect explicit role prefix
-                string role = null;
+                string role;
                 string content = cleaned;
 
-                foreach (var knownRole in new[] { "system", "user", "assistant" })
+                if (cleaned.StartsWith("system ", StringComparison.OrdinalIgnoreCase) ||
+                    cleaned.StartsWith("system\n", StringComparison.OrdinalIgnoreCase))
                 {
-                    if (cleaned.StartsWith(knownRole + " ", StringComparison.OrdinalIgnoreCase) ||
-                        cleaned.StartsWith(knownRole + "\n", StringComparison.OrdinalIgnoreCase))
-                    {
-                        Debug.Log($"Matched-Cleaned Role to: {knownRole}");
-
-                        role = knownRole;
-                        content = cleaned.Substring(knownRole.Length).Trim();
-                        break;
-                    }
-                    if (cleaned.Equals(knownRole, StringComparison.OrdinalIgnoreCase))
-                    {
-                        Debug.Log($"Matched Role to: {knownRole}");
-
-                        role = knownRole;
-                        content = "";
-                        break;
-                    }
+                    role = "system";
+                    content = cleaned.Substring("system".Length).Trim();
                 }
-
-                // No role prefix — infer from alternation position after the system block.
-                // Non-system blocks strictly alternate user/assistant, so position is deterministic.
-                if (role == null)
+                else
                 {
                     int nonSystemCount = messages.Count(m => m.role != "system");
                     role = (nonSystemCount % 2 == 0) ? "user" : "assistant";
                 }
 
-                if (string.IsNullOrEmpty(content))
-                    continue;
-
                 messages.Add(new APIMessage { role = role, content = content });
             }
 
-            // Drop failed exchange pairs — an empty assistant turn means the preceding user
-            // message never reached the LLM. Remove both so the history only reflects what
-            // the LLM actually saw and responded to.
-            var filteredMessages = new List<APIMessage>();
-            for (int i = 0; i < messages.Count; i++)
-            {
-                // If this is a user turn and the next is an empty assistant reply, skip both
-                if (i + 1 < messages.Count
-                    && messages[i].role == "user"
-                    && messages[i + 1].role == "assistant"
-                    && string.IsNullOrWhiteSpace(messages[i + 1].content))
-                {
-                    i++; // skip the empty assistant turn too
-                    continue;
-                }
+            // Remove empty content turns — these are failed LLM responses saved by LLMUnity.
+            // We keep the preceding user message since the user did send it.
+            messages = messages.Where(m => !string.IsNullOrWhiteSpace(m.content)).ToList();
 
-                // Also drop any stray empty turns that don't fit the pair pattern
-                if (!string.IsNullOrWhiteSpace(messages[i].content))
-                    filteredMessages.Add(messages[i]);
-            }
-            messages = filteredMessages;
+            // The last message is always from the user — this function is only ever called
+            // when LLMUnity is requesting a completion for a new user message.
+            if (messages.Count > 0 && messages[messages.Count - 1].role != "user")
+                messages[messages.Count - 1].role = "user";
+
+            // Merge consecutive same-role turns — handles failed exchanges where the user's
+            // previous message got no reply and now sits adjacent to their new message.
+            messages = MergeConsecutiveRoles(messages);
 
             if (messages.Count == 0 && !string.IsNullOrWhiteSpace(prompt))
             {
