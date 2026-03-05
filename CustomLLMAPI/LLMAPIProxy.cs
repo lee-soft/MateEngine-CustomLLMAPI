@@ -97,6 +97,7 @@ namespace LLMUnity
         // llama.cpp-style completion response (what LLMUnity expects back)
         public class ChatResult
         {
+            public string role = "assistant";
             public string content;
             public bool stop;
             public int id_slot;
@@ -332,7 +333,34 @@ namespace LLMUnity
                 ? null
                 : $"Bearer {config.apiKey}";
 
-            string apiResp = await ForwardNonStreaming(apiBody, config, authHeader);
+            string apiResp;
+            try
+            {
+                apiResp = await ForwardNonStreaming(apiBody, config, authHeader);
+            }
+            catch (Exception ex)
+            {
+                // Network failure — return a clean empty response so LLMUnity doesn't retry endlessly.
+                // Our empty-pair cleanup in ParseChatMLPrompt will drop this exchange from history
+                // on the next message, so it stays consistent.
+                Debug.LogWarning($"[LLM Proxy] Network error forwarding to LLM: {ex.Message}");
+                string emptyResult = JsonConvert.SerializeObject(new ChatResult { content = "", stop = true, id_slot = 0 });
+                if (isStream)
+                {
+                    string ssePayload = $"data: {emptyResult}\r\n\r\ndata: {{\"content\":\"\",\"stop\":true,\"id_slot\":0}}\r\n\r\n";
+                    byte[] sseBytes = Encoding.UTF8.GetBytes(ssePayload);
+                    string header = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n";
+                    string chunkHex = sseBytes.Length.ToString("x");
+                    string fullResp = header + chunkHex + "\r\n" + ssePayload + "\r\n0\r\n\r\n";
+                    byte[] fullBytes = Encoding.UTF8.GetBytes(fullResp);
+                    try { client.Send(fullBytes); } catch { }
+                }
+                else
+                {
+                    SendJson(client, 200, emptyResult);
+                }
+                return;
+            }
 
             // ── Debug: raw response from OpenAI ──
             Debug.Log($"[LLM Proxy] <<< Raw API response (first 500 chars):\n{(apiResp != null && apiResp.Length > 500 ? apiResp.Substring(0, 500) + "..." : apiResp)}");
