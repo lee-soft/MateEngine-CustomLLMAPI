@@ -27,6 +27,7 @@ namespace CustomLLMAPI
         public bool IsDancing { get; private set; } = false;
         public bool IsWalking { get; private set; } = false;
         public bool IsBigScreen { get; private set; } = false;
+        public float AvatarSize { get; private set; } = 1.0f;
 
         private Coroutine _moodHoldCoroutine;
         private PuppetMasterMoodProfile _moodProfile;
@@ -42,14 +43,48 @@ namespace CustomLLMAPI
 
         public AvatarStatus GetStatus()
         {
+            float savedSize = SaveLoadHandler.Instance?.data?.avatarSize ?? 1f;
+            AvatarSize = savedSize;
             return new AvatarStatus
             {
                 mood = CurrentMood,
                 dancing = IsDancing,
                 walking = IsWalking,
                 bigscreen = IsBigScreen,
-                avatar = GetAvatarDisplayName()
+                avatar = GetAvatarDisplayName(),
+                size = savedSize
             };
+        }
+
+        // ── Avatar Size ───────────────────────────────────────────────────────
+
+        /// <summary>Returns the current avatar scale from saved settings.</summary>
+        public float GetAvatarSize()
+        {
+            float size = SaveLoadHandler.Instance?.data?.avatarSize ?? 1f;
+            AvatarSize = size;
+            return size;
+        }
+
+        /// <summary>
+        /// Sets the avatar scale, persists it to settings, and applies it to all
+        /// AvatarAnimatorController instances — identical to what the settings slider does.
+        /// </summary>
+        /// <param name="size">Scale multiplier. Clamped to 0.1–5.0.</param>
+        /// <returns>"ok" or an error string.</returns>
+        public string SetAvatarSize(float size)
+        {
+            size = Mathf.Clamp(size, 0.1f, 5f);
+            AvatarSize = size;
+
+            if (SaveLoadHandler.Instance?.data != null)
+            {
+                SaveLoadHandler.Instance.data.avatarSize = size;
+                SaveLoadHandler.Instance.SaveToDisk();
+            }
+
+            SaveLoadHandler.ApplyAllSettingsToAllAvatars();
+            return "ok";
         }
 
         // ── Mood ──────────────────────────────────────────────────────────────
@@ -384,6 +419,7 @@ namespace CustomLLMAPI
             public bool walking;
             public bool bigscreen;
             public string avatar;
+            public float size;
         }
 
         public class AnimatorParamInfo

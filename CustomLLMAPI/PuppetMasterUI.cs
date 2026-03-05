@@ -47,6 +47,10 @@ button.pink    { background: #ec4899; color: #fff; }
 .tag { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 0.75em; font-weight: 700; margin-left: 6px; }
 .tag.on  { background: #10b981; color: #000; }
 .tag.off { background: #374151; color: #9ca3af; }
+.slider-row { display: flex; align-items: center; gap: 12px; }
+.slider-row input[type=range] { flex: 1; accent-color: #a78bfa; height: 6px; cursor: pointer; }
+.slider-row .slider-val { font-size: 0.9em; font-weight: 700; color: #a78bfa; min-width: 38px; text-align: right; }
+.slider-row button { flex: 0 0 auto; padding: 8px 12px; font-size: 0.8em; }
 </style>
 </head>
 <body>
@@ -109,6 +113,17 @@ button.pink    { background: #ec4899; color: #fff; }
     <div class='btn-grid cols-2'>
       <button class='success' onclick='setBigScreen(true)'>&#128250; Enable</button>
       <button class='neutral' onclick='setBigScreen(false)'>&#128444; Disable</button>
+    </div>
+  </div>
+
+  <div class='card'>
+    <h2>Avatar Size</h2>
+    <div class='slider-row'>
+      <input id='sizeSlider' type='range' min='0.1' max='1.3' step='0.05' value='1'
+             oninput=""document.getElementById('sizeVal').textContent=parseFloat(this.value).toFixed(2)+'x'""
+             onchange=""setAvatarSize(parseFloat(this.value))"">
+      <span class='slider-val' id='sizeVal'>1.00x</span>
+      <button class='neutral' onclick=""resetSize()"">Reset</button>
     </div>
   </div>
 
@@ -259,13 +274,50 @@ function updateBsTag(on) {
   tag.className = 'tag ' + (on ? 'on' : 'off');
 }
 
+function setAvatarSize(size) {
+  api('POST', '/size', { size: size })
+    .then(function(d) { flash(d.status === 'ok' ? '#a78bfa' : '#f87171'); })
+    .catch(setDisconnected);
+}
+
+function resetSize() {
+  var slider = document.getElementById('sizeSlider');
+  slider.value = 1;
+  document.getElementById('sizeVal').textContent = '1.00x';
+  setAvatarSize(1.0);
+}
+
+var _sliderDragging = false;
+document.addEventListener('DOMContentLoaded', function() {
+  var sl = document.getElementById('sizeSlider');
+  if (sl) {
+    sl.addEventListener('mousedown', function() { _sliderDragging = true; });
+    sl.addEventListener('touchstart', function() { _sliderDragging = true; });
+    sl.addEventListener('mouseup', function() { _sliderDragging = false; });
+    sl.addEventListener('touchend', function() { _sliderDragging = false; });
+  }
+});
+
+function syncSizeSlider(size) {
+  if (_sliderDragging) return;
+  var slider = document.getElementById('sizeSlider');
+  var label  = document.getElementById('sizeVal');
+  if (!slider || !label) return;
+  var rounded = Math.round(size * 100) / 100;
+  if (Math.abs(parseFloat(slider.value) - rounded) > 0.01) {
+    slider.value = rounded;
+    label.textContent = rounded.toFixed(2) + 'x';
+  }
+}
+
 function refreshStatus() {
   api('GET', '/status', null)
     .then(function(s) {
-      statusBar.textContent = 'Mood: ' + s.mood + '  |  Dancing: ' + s.dancing + '  |  Walking: ' + s.walking + '  |  BigScreen: ' + s.bigscreen;
+      statusBar.textContent = 'Mood: ' + s.mood + '  |  Dancing: ' + s.dancing + '  |  Walking: ' + s.walking + '  |  BigScreen: ' + s.bigscreen + '  |  Size: ' + (s.size ? parseFloat(s.size).toFixed(2) + 'x' : '—');
       document.getElementById('avatarName').textContent = s.avatar || '';
       updateBsTag(s.bigscreen);
       updateWalkTag(s.walking);
+      if (s.size !== undefined) syncSizeSlider(s.size);
       if (s.mood !== currentMood) {
         currentMood = s.mood;
         updateMoodButtons(s.mood);

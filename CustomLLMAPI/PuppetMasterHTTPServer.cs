@@ -37,6 +37,8 @@ namespace CustomLLMAPI
     ///   POST /animation/trigger -> body: {"param":"...", "value":"true|false"}
     ///   POST /headpat
     ///   GET  /blendshapes   -> JSON blendshape list for debug / profile authoring
+    ///   GET  /size          -> JSON {"size": 1.0}
+    ///   POST /size          -> body: {"size": 1.5}  (clamped 0.1–5.0)
     /// </summary>
     public class PuppetMasterHttpServer
     {
@@ -161,6 +163,8 @@ namespace CustomLLMAPI
             if (method == "POST" && path == "/animation/trigger") { RouteAnimTrigger(client, body); return; }
             if (method == "POST" && path == "/headpat") { RouteHeadpat(client); return; }
             if (method == "GET" && path == "/blendshapes") { RouteBlendshapes(client); return; }
+            if (method == "GET" && path == "/size") { RouteSizeGet(client); return; }
+            if (method == "POST" && path == "/size") { RouteSizeSet(client, body); return; }
 
             SendText(client, 404, "{\"error\":\"not found\"}", "application/json");
         }
@@ -176,7 +180,8 @@ namespace CustomLLMAPI
                        ",\"dancing\":" + Bool(s.dancing) +
                        ",\"walking\":" + Bool(s.walking) +
                        ",\"bigscreen\":" + Bool(s.bigscreen) +
-                       ",\"avatar\":\"" + s.avatar + "\"}";
+                       ",\"avatar\":\"" + s.avatar + "\"" +
+                       ",\"size\":" + s.size.ToString("F3", System.Globalization.CultureInfo.InvariantCulture) + "}";
             });
             SendText(client, 200, json, "application/json");
         }
@@ -305,6 +310,23 @@ namespace CustomLLMAPI
             SendText(client, 200, json, "application/json");
         }
 
+        private void RouteSizeGet(Socket client)
+        {
+            string json = MainThread(() =>
+            {
+                float size = _actions.GetAvatarSize();
+                return "{\"size\":" + size.ToString("F3", System.Globalization.CultureInfo.InvariantCulture) + "}";
+            });
+            SendText(client, 200, json, "application/json");
+        }
+
+        private void RouteSizeSet(Socket client, string body)
+        {
+            float size = ParseFloat(body, "size", 1f);
+            string json = MainThread(() => StatusJson(_actions.SetAvatarSize(size)));
+            SendText(client, 200, json, "application/json");
+        }
+
         // ── Main-thread bridge ────────────────────────────────────────────────
 
         /// Marshals a Func<string> onto the Unity main thread and returns its result.
@@ -344,6 +366,17 @@ namespace CustomLLMAPI
                 var d = JsonConvert.DeserializeObject<Dictionary<string, string>>(body ?? "{}");
                 if (d != null && d.TryGetValue(key, out var v))
                     return v != "false" && v != "0";
+            }
+            catch { }
+            return fallback;
+        }
+
+        private static float ParseFloat(string body, string key, float fallback)
+        {
+            try
+            {
+                var d = JsonConvert.DeserializeObject<Dictionary<string, float>>(body ?? "{}");
+                if (d != null && d.TryGetValue(key, out var v)) return v;
             }
             catch { }
             return fallback;
