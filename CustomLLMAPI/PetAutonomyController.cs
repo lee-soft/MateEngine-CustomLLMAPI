@@ -81,6 +81,15 @@ public class PetAutonomyController : MonoBehaviour
     private readonly List<string> _recentActions = new List<string>();
     private float _timeSinceLastMessage = 0f;   // minutes since last proactive message
 
+    private string _pendingUserMsg;
+    private string _pendingReplyMsg;
+
+    /// <summary>Rolling summary of the last chat session. Persists indefinitely until replaced.</summary>
+    private string _chatSummary;
+
+    /// <summary>True when a new exchange is waiting to be summarised on the next tick.</summary>
+    private bool _hasPendingExchange;
+
     // ── Data model returned by the LLM ────────────────────────────────────────
 
     [Serializable]
@@ -97,6 +106,9 @@ public class PetAutonomyController : MonoBehaviour
 
         /// <summary>Approximate minutes until the controller should tick again (1–60).</summary>
         public int next_tick_minutes = 2;
+
+        /// <summary>If non-empty, replaces the stored chat summary after this tick.</summary>
+        public string chat_summary = "";
     }
 
     // ── Config file (optional runtime override) ───────────────────────────────
@@ -203,6 +215,29 @@ public class PetAutonomyController : MonoBehaviour
         var moodList = _actions.GetMoodList();
         _timeSinceLastMessage += tickIntervalSeconds / 60f;
 
+        // ── Drain any pending chat exchange from the proxy ──
+        if (_proxy.PendingExchange != null)
+        {
+            var ex = _proxy.PendingExchange;
+            _proxy.PendingExchange = null;   // clear immediately so we don't double-process
+            _hasPendingExchange = true;
+
+            // Reconstruct the conversation as a readable transcript, capped at last 10
+            // user+assistant pairs to keep the prompt size bounded. System prompt excluded
+            // since the autonomy LLM already has the persona via its own system prompt.
+            var transcript = new StringBuilder();
+            var nonSystem = ex.Messages.FindAll(m => m.role != "system");
+            int start = Math.Max(0, nonSystem.Count - 20); // 20 = 10 pairs
+            for (int i = start; i < nonSystem.Count; i++)
+            {
+                var m = nonSystem[i];
+                string label = m.role == "user" ? userName : petName;
+                transcript.AppendLine($"{label}: {m.content}");
+            }
+            _pendingUserMsg = transcript.ToString().Trim();
+            _pendingReplyMsg = null; // now embedded in transcript
+        }
+
         // Build prompt on main thread (needs status), then hand off to background.
         string prompt = BuildPrompt(status, moodList);
 
@@ -256,6 +291,15 @@ public class PetAutonomyController : MonoBehaviour
             Debug.Log($"[PetAutonomy] Decision → {decision.action} ({decision.parameter}) | {decision.reason}");
 
         ExecuteAction(decision, status);
+        // Absorb updated chat summary if the LLM provided one.
+        if (!string.IsNullOrWhiteSpace(decision.chat_summary))
+        {
+            _chatSummary = decision.chat_summary;
+            _hasPendingExchange = false;
+            _pendingUserMsg = null;
+            _pendingReplyMsg = null;
+            Debug.Log($"[PetAutonomy] Chat summary updated: {_chatSummary}");
+        }
     }
 
     // ── Prompt construction ───────────────────────────────────────────────────
@@ -283,6 +327,22 @@ public class PetAutonomyController : MonoBehaviour
         else
             foreach (var a in _recentActions)
                 sb.AppendLine("  • " + a);
+
+        sb.AppendLine();
+        sb.AppendLine("=== LAST CHAT WITH USER ===");
+        if (_hasPendingExchange)
+        {
+            sb.AppendLine("A new conversation just ended. Read the transcript below and include a one-sentence summary in the chat_summary field.");
+            sb.AppendLine(_pendingUserMsg);
+        }
+        else if (!string.IsNullOrEmpty(_chatSummary))
+        {
+            sb.AppendLine(_chatSummary);
+        }
+        else
+        {
+            sb.AppendLine("(no chat yet)");
+        }
 
         sb.AppendLine();
         sb.AppendLine("=== AVAILABLE ACTIONS ===");
@@ -313,7 +373,8 @@ public class PetAutonomyController : MonoBehaviour
         sb.AppendLine("  \"action\": \"<action name>\",");
         sb.AppendLine("  \"parameter\": \"<value or empty string>\",");
         sb.AppendLine("  \"reason\": \"<one sentence explaining your choice>\",");
-        sb.AppendLine("  \"next_tick_minutes\": <integer 1-60>");
+        sb.AppendLine("  \"next_tick_minutes\": <integer 1-60>,");
+        sb.AppendLine("  \"chat_summary\": \"<one-sentence summary of chat history, or empty string if no new chat>\"");
         sb.AppendLine("}");
 
         return sb.ToString();

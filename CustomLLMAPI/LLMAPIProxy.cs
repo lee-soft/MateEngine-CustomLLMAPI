@@ -16,6 +16,16 @@ using UnityEngine;
 
 namespace LLMUnity
 {
+    public class PendingChatExchange
+    {
+        /// <summary>
+        /// Full conversation history as parsed from the ChatML prompt, including
+        /// the final assistant reply appended at the end. This is the complete
+        /// context LLMUnity sent — the autonomy tick uses it to produce a summary.
+        /// </summary>
+        public List<LLMAPIProxy.APIMessage> Messages;
+    }
+
     public class LLMAPIProxy : MonoBehaviour
     {
         [Header("Proxy Settings")]
@@ -28,6 +38,14 @@ namespace LLMUnity
         public bool isRunning = false;
         private Thread acceptThread;
         private const int MaxPortFallbacks = 10;
+
+        /// <summary>
+        /// Set by HandleCompletion after each chat exchange.
+        /// PetAutonomyController drains this on the next tick to update its summary.
+        /// Written from background threads — read on the autonomy tick thread.
+        /// Volatile is sufficient since it's a single reference swap.
+        /// </summary>
+        public volatile PendingChatExchange PendingExchange;
 
         public enum APIProvider { OpenAI, Anthropic, Custom }
 
@@ -320,6 +338,29 @@ namespace LLMUnity
             Debug.Log($"[LLM Proxy] <<< Raw API response (first 500 chars):\n{(apiResp != null && apiResp.Length > 500 ? apiResp.Substring(0, 500) + "..." : apiResp)}");
 
             string result = ConvertResponseToLlamaCpp(apiResp, config.provider, stop: true);
+            // ── Chat → Autonomy bridge: snapshot full history + assistant reply ──
+            try
+            {
+                string assistantText = ExtractFullContent(JToken.Parse(apiResp), config.provider);
+
+                if (!string.IsNullOrEmpty(assistantText) && messages.Count > 0)
+                {
+                    // Build a complete history: everything LLMUnity sent + the reply we got back.
+                    // This gives the autonomy tick the full conversation to summarise — for free,
+                    // since it's already in memory here.
+                    var fullHistory = new List<APIMessage>(messages)
+                    {
+                        new APIMessage { role = "assistant", content = assistantText }
+                    };
+
+                    PendingExchange = new PendingChatExchange { Messages = fullHistory };
+                    Debug.Log($"[LLM Proxy] Chat exchange captured: {fullHistory.Count} messages for autonomy summary.");
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning("[LLM Proxy] Failed to record chat exchange: " + ex.Message);
+            }
 
             // ── Debug: what we send back to LLMUnity ──
             Debug.Log($"[LLM Proxy] <<< Sending to LLMUnity (isStream={isStream}):\n{result}");
@@ -377,8 +418,6 @@ namespace LLMUnity
 
             var rawBlocks = prompt.Split(new[] { "<|im_start|>" }, StringSplitOptions.RemoveEmptyEntries);
 
-            int turnIndex = 0; // only incremented when we actually emit a non-system message
-
             foreach (var block in rawBlocks)
             {
                 string cleaned = block.Replace("<|im_end|>", "").Trim();
@@ -408,20 +447,15 @@ namespace LLMUnity
                     }
                 }
 
-                // No role prefix — infer from turn order
+                // No role prefix — infer from what was last added
                 if (role == null)
                 {
-                    role = (turnIndex % 2 == 0) ? "user" : "assistant";
-                    Debug.Log($"Role assumed: {role}");
+                    string lastRole = messages.Count > 0 ? messages[messages.Count - 1].role : "assistant";
+                    role = (lastRole == "user") ? "assistant" : "user";
                 }
 
-                // Empty content — skip entirely, do NOT touch turnIndex
                 if (string.IsNullOrEmpty(content))
                     continue;
-
-                // Only increment after we've confirmed there's real content to emit
-                if (role != "system")
-                    turnIndex++;
 
                 messages.Add(new APIMessage { role = role, content = content });
             }
