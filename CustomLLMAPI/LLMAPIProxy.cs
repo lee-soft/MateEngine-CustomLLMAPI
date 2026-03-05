@@ -447,11 +447,12 @@ namespace LLMUnity
                     }
                 }
 
-                // No role prefix — infer from what was last added
+                // No role prefix — infer from alternation position after the system block.
+                // Non-system blocks strictly alternate user/assistant, so position is deterministic.
                 if (role == null)
                 {
-                    string lastRole = messages.Count > 0 ? messages[messages.Count - 1].role : "assistant";
-                    role = (lastRole == "user") ? "assistant" : "user";
+                    int nonSystemCount = messages.Count(m => m.role != "system");
+                    role = (nonSystemCount % 2 == 0) ? "user" : "assistant";
                 }
 
                 if (string.IsNullOrEmpty(content))
@@ -459,6 +460,28 @@ namespace LLMUnity
 
                 messages.Add(new APIMessage { role = role, content = content });
             }
+
+            // Drop failed exchange pairs — an empty assistant turn means the preceding user
+            // message never reached the LLM. Remove both so the history only reflects what
+            // the LLM actually saw and responded to.
+            var filteredMessages = new List<APIMessage>();
+            for (int i = 0; i < messages.Count; i++)
+            {
+                // If this is a user turn and the next is an empty assistant reply, skip both
+                if (i + 1 < messages.Count
+                    && messages[i].role == "user"
+                    && messages[i + 1].role == "assistant"
+                    && string.IsNullOrWhiteSpace(messages[i + 1].content))
+                {
+                    i++; // skip the empty assistant turn too
+                    continue;
+                }
+
+                // Also drop any stray empty turns that don't fit the pair pattern
+                if (!string.IsNullOrWhiteSpace(messages[i].content))
+                    filteredMessages.Add(messages[i]);
+            }
+            messages = filteredMessages;
 
             if (messages.Count == 0 && !string.IsNullOrWhiteSpace(prompt))
             {
