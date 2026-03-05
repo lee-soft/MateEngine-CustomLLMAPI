@@ -43,8 +43,6 @@ namespace CustomLLMAPI
 
         public AvatarStatus GetStatus()
         {
-            float savedSize = SaveLoadHandler.Instance?.data?.avatarSize ?? 1f;
-            AvatarSize = savedSize;
             return new AvatarStatus
             {
                 mood = CurrentMood,
@@ -52,39 +50,79 @@ namespace CustomLLMAPI
                 walking = IsWalking,
                 bigscreen = IsBigScreen,
                 avatar = GetAvatarDisplayName(),
-                size = savedSize
+                size = AvatarSize > 0f ? AvatarSize : (SaveLoadHandler.Instance?.data?.avatarSize ?? 1f)
             };
         }
 
         // ── Avatar Size ───────────────────────────────────────────────────────
 
-        /// <summary>Returns the current avatar scale from saved settings.</summary>
+        /// <summary>Returns the current avatar scale (live, mid-tween accurate).</summary>
         public float GetAvatarSize()
         {
-            float size = SaveLoadHandler.Instance?.data?.avatarSize ?? 1f;
-            AvatarSize = size;
-            return size;
+            if (AvatarSize > 0f) return AvatarSize;
+            float saved = SaveLoadHandler.Instance?.data?.avatarSize ?? 1f;
+            AvatarSize = saved;
+            return saved;
         }
 
         /// <summary>
-        /// Sets the avatar scale, persists it to settings, and applies it to all
-        /// AvatarAnimatorController instances — identical to what the settings slider does.
+        /// Smoothly interpolates the avatar scale to <paramref name="size"/> over
+        /// <paramref name="duration"/> seconds, then persists the final value.
+        /// Safe to call from any thread — dispatches the coroutine onto the main thread.
         /// </summary>
-        /// <param name="size">Scale multiplier. Clamped to 0.1–5.0.</param>
-        /// <returns>"ok" or an error string.</returns>
-        public string SetAvatarSize(float size)
+        /// <param name="size">Target scale. Clamped to 0.5–1.3.</param>
+        /// <param name="duration">Transition time in seconds (default 0.6s).</param>
+        /// <returns>"ok" immediately (transition runs in background).</returns>
+        public string SetAvatarSize(float size, float duration = 0.6f)
         {
-            size = Mathf.Clamp(size, 0.1f, 5f);
-            AvatarSize = size;
+            size = Mathf.Clamp(size, 0.5f, 1.3f);
+            if (_sizeCoroutine != null) StopCoroutine(_sizeCoroutine);
+            _sizeCoroutine = StartCoroutine(SmoothScale(size, duration));
+            return "ok";
+        }
 
-            if (SaveLoadHandler.Instance?.data != null)
+        /// <summary>Sets avatar scale instantly with no tween. Used on startup / settings load.</summary>
+        public string SetAvatarSizeImmediate(float size)
+        {
+            size = Mathf.Clamp(size, 0.5f, 1.3f);
+            if (_sizeCoroutine != null) { StopCoroutine(_sizeCoroutine); _sizeCoroutine = null; }
+            ApplyScale(size);
+            return "ok";
+        }
+
+        private Coroutine _sizeCoroutine;
+
+        private IEnumerator SmoothScale(float target, float duration)
+        {
+            float start = AvatarSize;
+            float elapsed = 0f;
+
+            while (elapsed < duration)
             {
-                SaveLoadHandler.Instance.data.avatarSize = size;
-                SaveLoadHandler.Instance.SaveToDisk();
+                elapsed += Time.deltaTime;
+                float t = Mathf.SmoothStep(0f, 1f, elapsed / duration);
+                ApplyScale(Mathf.Lerp(start, target, t));
+                yield return null;
             }
 
-            SaveLoadHandler.ApplyAllSettingsToAllAvatars();
-            return "ok";
+            ApplyScale(target);
+            _sizeCoroutine = null;
+
+            // Persist once the tween settles.
+            if (SaveLoadHandler.Instance?.data != null)
+            {
+                SaveLoadHandler.Instance.data.avatarSize = target;
+                SaveLoadHandler.Instance.SaveToDisk();
+            }
+        }
+
+        private void ApplyScale(float size)
+        {
+            AvatarSize = size;
+            var avatars = Resources.FindObjectsOfTypeAll<AvatarAnimatorController>();
+            foreach (var avatar in avatars)
+                if (avatar != null)
+                    avatar.transform.localScale = Vector3.one * size;
         }
 
         // ── Mood ──────────────────────────────────────────────────────────────

@@ -319,7 +319,7 @@ public class PetAutonomyController : MonoBehaviour
         sb.AppendLine($"Dancing: {status.dancing}");
         sb.AppendLine($"Walking: {status.walking}");
         sb.AppendLine($"Big screen visible: {status.bigscreen}");
-        sb.AppendLine($"Current size: {status.size:F2} (range 0.5–1.3, where 1.0 is default and 1.3 fills ~60% of screen height)");
+        sb.AppendLine($"Current size: {status.size:F2} (range 0.5–1.3, where 1.0 is default and 1.3 fills ~75% of screen height)");
         sb.AppendLine($"Minutes since last proactive message: {_timeSinceLastMessage:F0}");
 
         if (moodList != null && moodList.Count > 0)
@@ -359,7 +359,6 @@ public class PetAutonomyController : MonoBehaviour
         if (allowMoodChanges) sb.AppendLine("  mood           – change facial expression (parameter: one of the available moods above)");
         if (allowBigScreen) sb.AppendLine("  big_screen     – expand to big-screen overlay mode");
         if (allowBigScreen) sb.AppendLine("  hide_screen    – return from big-screen to normal size");
-        if (allowSizeChanges) sb.AppendLine("  set_size       – resize yourself on screen (size field: 0.5=small, 1.0=default, 1.3=large ~60% screen height)");
         if (allowProactiveMessages)
             sb.AppendLine("  message        – display a speech-bubble message to the user (parameter: the message text, max 80 chars)");
         sb.AppendLine("  idle           – do nothing special");
@@ -378,7 +377,10 @@ public class PetAutonomyController : MonoBehaviour
         sb.AppendLine("{");
         sb.AppendLine("  \"action\": \"<action name>\",");
         sb.AppendLine("  \"parameter\": \"<value or empty string>\",");
-        sb.AppendLine("  \"size\": <float 0.5–1.3, only required when action is set_size, otherwise omit or use -1>,");
+        if (allowSizeChanges)
+        {
+            sb.AppendLine("  \"size\": <optional float 0.5–1.3 — include ONLY if you want to change your size, omit otherwise>,");
+        }
         sb.AppendLine("  \"reason\": \"<one sentence explaining your choice>\",");
         sb.AppendLine("  \"next_tick_minutes\": <integer 1-60>,");
         sb.AppendLine("  \"chat_summary\": \"<one-sentence summary of chat history, or empty string if no new chat>\"");
@@ -474,19 +476,6 @@ public class PetAutonomyController : MonoBehaviour
                 result = _actions.SetBigScreen(false);
                 break;
 
-            case "set_size":
-                {
-                    if (!allowSizeChanges) { LogSkipped(decision.action); break; }
-                    // Accept from the dedicated size field; fall back to parsing parameter string.
-                    float targetSize = decision.size > 0f ? decision.size : 1f;
-                    if (targetSize <= 0f && !string.IsNullOrEmpty(decision.parameter))
-                        float.TryParse(decision.parameter, System.Globalization.NumberStyles.Float,
-                            System.Globalization.CultureInfo.InvariantCulture, out targetSize);
-                    targetSize = Mathf.Clamp(targetSize, 0.5f, 1.5f);
-                    result = _actions.SetAvatarSize(targetSize);
-                    break;
-                }
-
             case "message":
                 {
                     if (!allowProactiveMessages) { LogSkipped(decision.action); break; }
@@ -503,6 +492,13 @@ public class PetAutonomyController : MonoBehaviour
             default:
                 // Intentionally do nothing.
                 break;
+        }
+
+        // Apply size change if the LLM included one — works on any action.
+        if (allowSizeChanges && decision.size >= 0.5f && decision.size <= 1.3f)
+        {
+            string sizeResult = _actions.SetAvatarSize(decision.size);
+            Debug.Log($"[PetAutonomy] Size → {decision.size:F2} ({sizeResult})");
         }
 
         // Record in context window.
