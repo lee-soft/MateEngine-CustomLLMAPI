@@ -166,7 +166,10 @@ namespace CustomLLMAPI
             if (method == "GET" && path == "/size") { RouteSizeGet(client); return; }
             if (method == "POST" && path == "/size") { RouteSizeSet(client, body); return; }
             if (method == "GET" && path == "/windows") { RouteWindowList(client); return; }
+            if (method == "GET" && path == "/windows/visible") { RouteVisibleWindowList(client); return; }
             if (method == "POST" && path == "/window/snap") { RouteWindowSnap(client, body); return; }
+            if (method == "POST" && path == "/window/snap/focused") { RouteWindowSnapFocused(client); return; }
+            if (method == "POST" && path == "/window/unsit") { RouteWindowUnsit(client); return; }
 
             SendText(client, 404, "{\"error\":\"not found\"}", "application/json");
         }
@@ -183,7 +186,9 @@ namespace CustomLLMAPI
                        ",\"walking\":" + Bool(s.walking) +
                        ",\"bigscreen\":" + Bool(s.bigscreen) +
                        ",\"avatar\":\"" + s.avatar + "\"" +
-                       ",\"size\":" + s.size.ToString("F3", System.Globalization.CultureInfo.InvariantCulture) + "}";
+                       ",\"size\":" + s.size.ToString("F3", System.Globalization.CultureInfo.InvariantCulture) +
+                       ",\"isWindowSit\":" + Bool(s.isWindowSit) +
+                       ",\"snappedWindowTitle\":\"" + (s.snappedWindowTitle ?? "").Replace("\"", "\\\"") + "\"}";
             });
             SendText(client, 200, json, "application/json");
         }
@@ -343,6 +348,28 @@ namespace CustomLLMAPI
         {
             string title = ParseString(body, "title", "");
             string json = MainThread(() => StatusJson(_actions.SnapToWindow(title)));
+            SendText(client, 200, json, "application/json");
+        }
+
+        private void RouteVisibleWindowList(Socket client)
+        {
+            string json = MainThread(() =>
+            {
+                var list = _actions.GetVisibleWindowList();
+                return "[" + string.Join(",", list.ConvertAll(t => "\"" + t.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\"")) + "]";
+            });
+            SendText(client, 200, json, "application/json");
+        }
+
+        private void RouteWindowSnapFocused(Socket client)
+        {
+            string json = MainThread(() => StatusJson(_actions.SnapToFocusedWindow()));
+            SendText(client, 200, json, "application/json");
+        }
+
+        private void RouteWindowUnsit(Socket client)
+        {
+            string json = MainThread(() => StatusJson(_actions.Unsit()));
             SendText(client, 200, json, "application/json");
         }
 

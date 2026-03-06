@@ -60,6 +60,7 @@ public class PetAutonomyController : MonoBehaviour
     public bool allowBigScreen = true;
     public bool allowMoodChanges = true;
     public bool allowSizeChanges = true;
+    public bool allowWindowSitting = true;
 
     [Header("Debug")]
     public bool logLLMRequests = false;
@@ -96,7 +97,7 @@ public class PetAutonomyController : MonoBehaviour
     [Serializable]
     public class AutonomyAction
     {
-        /// <summary>One of: idle, dance, stop_dance, walk, stop_walk, message, mood, big_screen, hide_screen, wait</summary>
+        /// <summary>One of: idle, dance, stop_dance, walk, stop_walk, message, mood, big_screen, hide_screen, sit_on_window, sit_on_focused, unsit, wait</summary>
         public string action = "idle";
 
         /// <summary>For dance: 0-based index. For mood: mood name. For message: text. For wait: ignored.</summary>
@@ -217,6 +218,7 @@ public class PetAutonomyController : MonoBehaviour
 
         var status = _actions.GetStatus();
         var moodList = _actions.GetMoodList();
+        var windowList = allowWindowSitting ? _actions.GetVisibleWindowList() : null;
         _timeSinceLastMessage += tickIntervalSeconds / 60f;
 
         // ── Drain any pending chat exchange from the proxy ──
@@ -243,7 +245,7 @@ public class PetAutonomyController : MonoBehaviour
         }
 
         // Build prompt on main thread (needs status), then hand off to background.
-        string prompt = BuildPrompt(status, moodList);
+        string prompt = BuildPrompt(status, moodList, windowList);
 
         if (logLLMRequests)
             Debug.Log("[PetAutonomy] Prompt:\n" + prompt);
@@ -308,7 +310,7 @@ public class PetAutonomyController : MonoBehaviour
 
     // ── Prompt construction ───────────────────────────────────────────────────
 
-    private string BuildPrompt(PuppetMasterActions.AvatarStatus status, List<string> moodList)
+    private string BuildPrompt(PuppetMasterActions.AvatarStatus status, List<string> moodList, List<string> windowList = null)
     {
         var sb = new StringBuilder();
 
@@ -321,9 +323,21 @@ public class PetAutonomyController : MonoBehaviour
         sb.AppendLine($"Big screen visible: {status.bigscreen}");
         sb.AppendLine($"Current size: {status.size:F2} (range 0.5–1.3, where 1.0 is default and 1.3 fills ~75% of screen height)");
         sb.AppendLine($"Minutes since last proactive message: {_timeSinceLastMessage:F0}");
+        sb.AppendLine($"Currently sitting on window: {(status.isWindowSit ? "\"" + status.snappedWindowTitle + "\"" : "no")}");
 
         if (moodList != null && moodList.Count > 0)
             sb.AppendLine($"Available moods: {string.Join(", ", moodList)}");
+
+        if (allowWindowSitting && windowList != null && windowList.Count > 0)
+        {
+            sb.AppendLine();
+            sb.AppendLine("=== VISIBLE WINDOWS ===");
+            sb.AppendLine("These windows are currently open and visible on screen.");
+            sb.AppendLine("[FOCUSED] = user is actively using it. [VISIBLE] = open but not focused.");
+            sb.AppendLine("Only sit on windows from this list. Never sit on a window not listed here.");
+            foreach (var w in windowList)
+                sb.AppendLine("  • " + w);
+        }
 
         sb.AppendLine();
         sb.AppendLine("=== RECENT ACTIONS (oldest first) ===");
@@ -363,6 +377,12 @@ public class PetAutonomyController : MonoBehaviour
             sb.AppendLine("  message        – display a speech-bubble message to the user (parameter: the message text, max 80 chars)");
         sb.AppendLine("  idle           – do nothing special");
         sb.AppendLine("  wait           – stay as-is and check back later");
+        if (allowWindowSitting)
+        {
+            sb.AppendLine("  sit_on_window  – sit on a specific window (parameter: exact title from VISIBLE WINDOWS list)");
+            sb.AppendLine("  sit_on_focused – sit on whatever window the user is currently focused on");
+            sb.AppendLine("  unsit          – get up from the current window");
+        }
 
         sb.AppendLine();
         sb.AppendLine("=== INSTRUCTIONS ===");
@@ -486,6 +506,24 @@ public class PetAutonomyController : MonoBehaviour
                     _timeSinceLastMessage = 0f;
                     break;
                 }
+
+            case "sit_on_window":
+                {
+                    if (!allowWindowSitting) { LogSkipped(decision.action); break; }
+                    if (!string.IsNullOrEmpty(decision.parameter))
+                        result = _actions.SnapToWindow(decision.parameter);
+                    break;
+                }
+
+            case "sit_on_focused":
+                if (!allowWindowSitting) { LogSkipped(decision.action); break; }
+                result = _actions.SnapToFocusedWindow();
+                break;
+
+            case "unsit":
+                if (!allowWindowSitting) { LogSkipped(decision.action); break; }
+                result = _actions.Unsit();
+                break;
 
             case "idle":
             case "wait":

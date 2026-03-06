@@ -138,6 +138,8 @@ button.pink    { background: #ec4899; color: #fff; }
   </div>
   <div class='btn-grid cols-1'>
     <button class='primary' onclick='snapToWindow()'>&#128188; Snap to Window</button>
+    <button class='warning' onclick='snapToFocused()'>&#127919; Snap to Focused</button>
+    <button class='danger' onclick='unsit()'>&#128693; Unsit</button>
   </div>
   <div id='snapStatus' style='margin-top:8px;font-size:0.8em;color:#6b7280;min-height:1.2em;'></div>
 </div>
@@ -328,7 +330,7 @@ function syncSizeSlider(size) {
 function refreshStatus() {
   api('GET', '/status', null)
     .then(function(s) {
-      statusBar.textContent = 'Mood: ' + s.mood + '  |  Dancing: ' + s.dancing + '  |  Walking: ' + s.walking + '  |  BigScreen: ' + s.bigscreen + '  |  Size: ' + (s.size ? parseFloat(s.size).toFixed(2) + 'x' : '—');
+      statusBar.textContent = 'Mood: ' + s.mood + '  |  Dancing: ' + s.dancing + '  |  Walking: ' + s.walking + '  |  BigScreen: ' + s.bigscreen + '  |  Size: ' + (s.size ? parseFloat(s.size).toFixed(2) + 'x' : '—') + (s.isWindowSit ? '  |  Sitting: ' + s.snappedWindowTitle : '');
       document.getElementById('avatarName').textContent = s.avatar || '';
       updateBsTag(s.bigscreen);
       updateWalkTag(s.walking);
@@ -354,8 +356,38 @@ function flash(color) {
 }
 
 
+function snapToFocused() {
+  var statusEl = document.getElementById('snapStatus');
+  statusEl.textContent = 'Snapping to focused window...';
+  statusEl.style.color = '#6b7280';
+  api('POST', '/window/snap/focused', null)
+    .then(function(d) {
+      if (d.status === 'ok') {
+        statusEl.textContent = 'Snapped to focused window';
+        statusEl.style.color = '#4ade80';
+        flash('#4ade80');
+      } else {
+        statusEl.textContent = d.status;
+        statusEl.style.color = '#f87171';
+        flash('#f87171');
+      }
+    })
+    .catch(function() { statusEl.textContent = 'Request failed.'; statusEl.style.color = '#f87171'; setDisconnected(); });
+}
+
+function unsit() {
+  var statusEl = document.getElementById('snapStatus');
+  api('POST', '/window/unsit', null)
+    .then(function(d) {
+      statusEl.textContent = d.status === 'ok' ? 'Unsitted!' : d.status;
+      statusEl.style.color = d.status === 'ok' ? '#4ade80' : '#f87171';
+      flash(d.status === 'ok' ? '#4ade80' : '#f87171');
+    })
+    .catch(setDisconnected);
+}
+
 function loadWindows() {
-  api('GET', '/windows', null)
+  api('GET', '/windows/visible', null)
     .then(function(list) {
       var sel = document.getElementById('windowSelect');
       sel.innerHTML = '';
@@ -366,10 +398,11 @@ function loadWindows() {
         sel.appendChild(opt);
         return;
       }
-      list.forEach(function(title) {
+      list.forEach(function(taggedTitle) {
+        var cleanTitle = taggedTitle.replace(/^[^\]]*\]\s*/, '');
         var opt = document.createElement('option');
-        opt.value = title;
-        opt.textContent = title;
+        opt.value = cleanTitle;
+        opt.textContent = taggedTitle;
         sel.appendChild(opt);
       });
     })
@@ -377,7 +410,8 @@ function loadWindows() {
 }
 
 function snapToWindow() {
-  var title = document.getElementById('windowSelect').value;
+  var rawTitle = document.getElementById('windowSelect').value;
+  var title = rawTitle.replace(/^[^\]]*\]\s*/, '');
   var statusEl = document.getElementById('snapStatus');
   if (!title) { statusEl.textContent = 'Select a window first.'; statusEl.style.color = '#f87171'; return; }
   statusEl.textContent = 'Snapping...';

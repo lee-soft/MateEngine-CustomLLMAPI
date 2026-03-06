@@ -45,6 +45,22 @@ namespace CustomLLMAPI
 
         public AvatarStatus GetStatus()
         {
+            bool isWindowSit = false;
+            string snappedTitle = "";
+            var handler = FindAnyObjectByType<AvatarWindowHandler>();
+            if (handler != null)
+            {
+                var priv = System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance;
+                var type = typeof(AvatarWindowHandler);
+                var snappedHWND = (IntPtr)(type.GetField("snappedHWND", priv)?.GetValue(handler) ?? IntPtr.Zero);
+                if (snappedHWND != IntPtr.Zero)
+                {
+                    isWindowSit = true;
+                    var sb = new StringBuilder(256);
+                    GetWindowText(snappedHWND, sb, sb.Capacity);
+                    snappedTitle = sb.ToString();
+                }
+            }
             return new AvatarStatus
             {
                 mood = CurrentMood,
@@ -52,7 +68,9 @@ namespace CustomLLMAPI
                 walking = IsWalking,
                 bigscreen = IsBigScreen,
                 avatar = GetAvatarDisplayName(),
-                size = AvatarSize > 0f ? AvatarSize : (SaveLoadHandler.Instance?.data?.avatarSize ?? 1f)
+                size = AvatarSize > 0f ? AvatarSize : (SaveLoadHandler.Instance?.data?.avatarSize ?? 1f),
+                isWindowSit = isWindowSit,
+                snappedWindowTitle = snappedTitle
             };
         }
 
@@ -298,6 +316,8 @@ namespace CustomLLMAPI
         [DllImport("user32.dll", CharSet = CharSet.Auto)] private static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int count);
         [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr hWnd, out WinRect rect);
         [DllImport("user32.dll", CharSet = CharSet.Auto)] private static extern IntPtr FindWindow(string lpClassName, string lpWindowName);
+        [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
+        [DllImport("user32.dll")] private static extern bool IsIconic(IntPtr hWnd);
         private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
 
         [StructLayout(LayoutKind.Sequential)]
@@ -325,6 +345,90 @@ namespace CustomLLMAPI
         }
 
         /// <summary>
+        /// Returns only windows that are not minimized and not substantially occluded,
+        /// tagged with [FOCUSED] or [VISIBLE] for LLM consumption.
+        /// </summary>
+        public List<string> GetVisibleWindowList()
+        {
+            var result = new List<string>();
+            IntPtr foreground = GetForegroundWindow();
+
+            var candidates = new List<(IntPtr hwnd, string title, WinRect rect)>();
+
+            EnumWindows((hWnd, _) =>
+            {
+                if (!IsWindowVisible(hWnd)) return true;
+                if (IsIconic(hWnd)) return true;
+                int len = GetWindowTextLength(hWnd);
+                if (len == 0) return true;
+                if (!GetWindowRect(hWnd, out WinRect r)) return true;
+                if ((r.Right - r.Left) < 200 || (r.Bottom - r.Top) < 60) return true;
+                var sb = new StringBuilder(len + 1);
+                GetWindowText(hWnd, sb, sb.Capacity);
+                string title = sb.ToString();
+                if (!string.IsNullOrEmpty(title))
+                    candidates.Add((hWnd, title, r));
+                return true;
+            }, IntPtr.Zero);
+
+            foreach (var (hwnd, title, rect) in candidates)
+            {
+                if (IsSubstantiallyOccluded(hwnd, rect, candidates)) continue;
+                string tag = hwnd == foreground ? "[FOCUSED]" : "[VISIBLE]";
+                result.Add(tag + " " + title);
+            }
+
+            return result;
+        }
+
+        private bool IsSubstantiallyOccluded(IntPtr hwnd, WinRect rect,
+            List<(IntPtr hwnd, string title, WinRect rect)> allWindows)
+        {
+            float totalArea = (float)(rect.Right - rect.Left) * (rect.Bottom - rect.Top);
+            if (totalArea <= 0) return true;
+
+            float occludedArea = 0f;
+            bool foundSelf = false;
+
+            foreach (var (otherHwnd, _, otherRect) in allWindows)
+            {
+                if (otherHwnd == hwnd) { foundSelf = true; continue; }
+                if (foundSelf) continue;
+
+                int ix1 = Math.Max(rect.Left, otherRect.Left);
+                int iy1 = Math.Max(rect.Top, otherRect.Top);
+                int ix2 = Math.Min(rect.Right, otherRect.Right);
+                int iy2 = Math.Min(rect.Bottom, otherRect.Bottom);
+
+                if (ix2 > ix1 && iy2 > iy1)
+                    occludedArea += (float)(ix2 - ix1) * (iy2 - iy1);
+            }
+
+            return (occludedArea / totalArea) > 0.70f;
+        }
+
+        /// <summary>Snaps the pet to sit on whichever window currently has focus.</summary>
+        public string SnapToFocusedWindow()
+        {
+            IntPtr hwnd = GetForegroundWindow();
+            if (hwnd == IntPtr.Zero) return "ERROR: no focused window";
+            var sb = new StringBuilder(256);
+            GetWindowText(hwnd, sb, sb.Capacity);
+            string title = sb.ToString();
+            if (string.IsNullOrEmpty(title)) return "ERROR: focused window has no title";
+            return SnapToWindow(title);
+        }
+
+        /// <summary>Gets the pet off any window it is currently sitting on.</summary>
+        public string Unsit()
+        {
+            var handler = FindAnyObjectByType<AvatarWindowHandler>();
+            if (handler == null) return "ERROR: AvatarWindowHandler not found";
+            handler.ForceExitWindowSitting();
+            return "ok";
+        }
+
+        /// <summary>
         /// Snaps the pet to sit on the window matching <paramref name="windowTitle"/>.
         /// Enables window sitting in SaveData, then drives AvatarWindowHandler via reflection.
         /// </summary>
@@ -336,39 +440,37 @@ namespace CustomLLMAPI
             if (targetHwnd == IntPtr.Zero) return "ERROR: window not found";
             if (!GetWindowRect(targetHwnd, out WinRect tr)) return "ERROR: could not get window rect";
 
+            // Make sure the feature flag is on
             if (SaveLoadHandler.Instance?.data != null)
                 SaveLoadHandler.Instance.data.enableWindowSitting = true;
 
             var handler = FindAnyObjectByType<AvatarWindowHandler>();
             if (handler == null) return "ERROR: AvatarWindowHandler not found";
 
-            var type = typeof(AvatarWindowHandler);
-            var priv = BindingFlags.NonPublic | BindingFlags.Instance;
-            var pub = BindingFlags.Public | BindingFlags.Instance;
+            var type  = typeof(AvatarWindowHandler);
+            var priv  = BindingFlags.NonPublic | BindingFlags.Instance;
+            var pub   = BindingFlags.Public    | BindingFlags.Instance;
 
-            var animatorField = type.GetField("animator", priv);
-            var snappedField = type.GetField("snappedHWND", priv);
-            var fracField = type.GetField("snapFraction", priv);
-            var guardField = type.GetField("_guard", priv);
-            var latchField = type.GetField("_latch", priv);
-            var smoothField = type.GetField("_snapSmoothingActive", priv);
-            var velXField = type.GetField("_snapVelX", priv);
-            var velYField = type.GetField("_snapVelY", priv);
-            var prevRectField = type.GetField("_havePrevSnapRect", priv);
-            var lastSnapYField = type.GetField("_lastSnapTopY", priv);
-            var recentUnsnapField = type.GetField("_recentUnsnap", priv);
-            var guardZoneField = type.GetField("_guardZoneActive", priv);
-            var settleFrames = type.GetField("_postSettleFrames", priv);
-            var settleRecalib = type.GetField("_postSettleRecalib", priv);
-            var nextEnumField = type.GetField("_nextEnumTime", priv);
-            var wasSittingField = type.GetField("wasSitting", priv);
-            var seatCalibratedField = type.GetField("seatCalibrated", priv);
+            var animatorField     = type.GetField("animator",              priv);
+            var snappedField      = type.GetField("snappedHWND",           priv);
+            var fracField         = type.GetField("snapFraction",          priv);
+            var guardField        = type.GetField("_guard",                priv);
+            var latchField        = type.GetField("_latch",                priv);
+            var smoothField       = type.GetField("_snapSmoothingActive",  priv);
+            var velXField         = type.GetField("_snapVelX",             priv);
+            var velYField         = type.GetField("_snapVelY",             priv);
+            var prevRectField     = type.GetField("_havePrevSnapRect",     priv);
+            var lastSnapYField    = type.GetField("_lastSnapTopY",         priv);
+            var recentUnsnapField = type.GetField("_recentUnsnap",         priv);
+            var guardZoneField    = type.GetField("_guardZoneActive",      priv);
+            var settleFrames      = type.GetField("_postSettleFrames",     priv);
+            var settleRecalib     = type.GetField("_postSettleRecalib",    priv);
 
-            var updateCached = type.GetMethod("UpdateCachedWindows", priv);
-            var rebuildOccluders = type.GetMethod("RebuildActiveOccluders", priv);
-            var updateOccluders = type.GetMethod("UpdateOccluderQuadsFrameSync", priv);
-            var setTopMost = type.GetMethod("SetTopMost", priv);
-            var pinToTarget = type.GetMethod("PinToTarget", priv);
+            var calibrate        = type.GetMethod("CalibrateSeatAnchorToDesktopY", priv);
+            var setTopMost       = type.GetMethod("SetTopMost",                    priv);
+            var rebuildOccluders = type.GetMethod("RebuildActiveOccluders",        priv);
+            var updateOccluders  = type.GetMethod("UpdateOccluderQuadsFrameSync",  priv);
+            var pinToTarget      = type.GetMethod("PinToTarget",                   priv);
 
             if (animatorField == null || snappedField == null)
                 return "ERROR: reflection failed";
@@ -377,17 +479,19 @@ namespace CustomLLMAPI
             if (animator == null) return "ERROR: animator not resolved";
 
             // Populate cachedWindows NOW so Update()'s validation check finds the window
+            var updateCached  = type.GetMethod("UpdateCachedWindows", priv);
+            var nextEnumField = type.GetField("_nextEnumTime", priv);
             updateCached?.Invoke(handler, null);
             nextEnumField?.SetValue(handler, Time.unscaledTime + 1f);
 
             snappedField.SetValue(handler, targetHwnd);
             guardZoneField?.SetValue(handler, false);
 
-            // Reset wasSitting so Update() fires the WindowSitIndex assignment
-            wasSittingField?.SetValue(handler, false);
-            seatCalibratedField?.SetValue(handler, false);
+            // Reset wasSitting so Update() fires the WindowSitIndex blend tree assignment
+            type.GetField("wasSitting",     priv)?.SetValue(handler, false);
+            type.GetField("seatCalibrated", priv)?.SetValue(handler, false);
 
-            animator.SetBool("isWindowSit", true);
+            animator.SetBool("isWindowSit",  true);
             animator.SetBool("isTaskbarSit", false);
             animator.Update(0f);
 
@@ -410,6 +514,7 @@ namespace CustomLLMAPI
 
             setTopMost?.Invoke(handler, new object[] { true });
             rebuildOccluders?.Invoke(handler, null);
+            updateOccluders?.Invoke(handler, null);
 
             var rectType = type.GetNestedType("RECT", BindingFlags.NonPublic | BindingFlags.Public);
             if (rectType != null && pinToTarget != null)
@@ -422,36 +527,76 @@ namespace CustomLLMAPI
                 pinToTarget.Invoke(handler, new object[] { rect });
             }
 
-            StartCoroutine(PulseDraggingForSnap());
+            StartCoroutine(PulseDraggingForSnap(handler, targetHwnd));
             return "ok";
         }
 
-        private IEnumerator PulseDraggingForSnap()
+        private IEnumerator PulseDraggingForSnap(AvatarWindowHandler handler, IntPtr targetHwnd)
         {
             var ctrl = FindAnyObjectByType<AvatarAnimatorController>();
-            if (ctrl == null) { Debug.Log("[PuppetMaster] AvatarAnimatorController not found"); yield break; }
+            if (ctrl == null) yield break;
 
-            var animator = ctrl.animator;
+            var type = typeof(AvatarWindowHandler);
+            var priv = BindingFlags.NonPublic | BindingFlags.Instance;
+            var pub = BindingFlags.Public | BindingFlags.Instance;
 
-            // Set both the public field and the animator bool — same as SetDragging() does
+            var calibrate = type.GetMethod("CalibrateSeatAnchorToDesktopY", priv);
+            var settleFrames = type.GetField("_postSettleFrames", priv);
+            var settleRecalib = type.GetField("_postSettleRecalib", priv);
+            var fracField = type.GetField("snapFraction", priv);
+            var pinToTarget = type.GetMethod("PinToTarget", priv);
+
+            // Phase 1: start drag, wait for animator to settle into drag pose
             ctrl.isDragging = true;
-            animator.SetBool("isDragging", true);
+            ctrl.animator.SetBool("isDragging", true);
 
-            Debug.Log("[PuppetMaster] Pulse start — isDragging: " + ctrl.isDragging
-                + " | isWindowSit: " + animator.GetBool("isWindowSit")
-                + " | state: " + animator.GetCurrentAnimatorStateInfo(0).IsName("Idle"));
-
+            // Wait a few frames for the drag animation to fully blend in
             for (int i = 0; i < 30; i++)
                 yield return null;
 
+            // Phase 2: bones are now in drag pose — calibrate seat anchor
+            if (GetWindowRect(targetHwnd, out WinRect tr))
+            {
+                float seatOffsetPx = (float?)type.GetField("seatOffsetPx", pub)?.GetValue(handler) ?? 0f;
+                calibrate?.Invoke(handler, new object[] { (float)(tr.Top + seatOffsetPx + 20f) });
+
+                // Recalculate snap fraction now that seat is calibrated
+                var computeSeat = type.GetMethod("ComputeSeatDesktop", priv);
+                if (computeSeat != null)
+                {
+                    var args = new object[] { 0f, 0f };
+                    bool ok = (bool)computeSeat.Invoke(handler, args);
+                    if (ok)
+                    {
+                        float px2 = (float)args[0];
+                        float w = Mathf.Max(1, tr.Right - tr.Left);
+                        fracField?.SetValue(handler, Mathf.Clamp01((px2 - tr.Left) / w));
+                    }
+                }
+
+                settleFrames?.SetValue(handler, 0);
+                settleRecalib?.SetValue(handler, false);
+
+                // Pin immediately with calibrated position
+                var rectType = type.GetNestedType("RECT", BindingFlags.NonPublic | BindingFlags.Public);
+                if (rectType != null && pinToTarget != null)
+                {
+                    var rect = Activator.CreateInstance(rectType);
+                    rectType.GetField("Left")?.SetValue(rect, tr.Left);
+                    rectType.GetField("Top")?.SetValue(rect, tr.Top);
+                    rectType.GetField("Right")?.SetValue(rect, tr.Right);
+                    rectType.GetField("Bottom")?.SetValue(rect, tr.Bottom);
+                    pinToTarget.Invoke(handler, new object[] { rect });
+                }
+            }
+
+            // Phase 3: hold drag for remaining frames so animator completes transition
+            for (int i = 0; i < 22; i++)
+                yield return null;
+
             ctrl.isDragging = false;
-            animator.SetBool("isDragging", false);
-
-            Debug.Log("[PuppetMaster] Pulse end — state is now Idle: "
-                + animator.GetCurrentAnimatorStateInfo(0).IsName("Idle"));
+            ctrl.animator.SetBool("isDragging", false);
         }
-
-
         // ── Head pat ──────────────────────────────────────────────────────────
 
         public string Headpat()
@@ -622,6 +767,8 @@ namespace CustomLLMAPI
             public bool bigscreen;
             public string avatar;
             public float size;
+            public bool isWindowSit;
+            public string snappedWindowTitle;
         }
 
         public class AnimatorParamInfo
