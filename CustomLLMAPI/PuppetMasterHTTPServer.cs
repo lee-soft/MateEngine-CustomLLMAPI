@@ -165,6 +165,8 @@ namespace CustomLLMAPI
             if (method == "GET" && path == "/blendshapes") { RouteBlendshapes(client); return; }
             if (method == "GET" && path == "/size") { RouteSizeGet(client); return; }
             if (method == "POST" && path == "/size") { RouteSizeSet(client, body); return; }
+            if (method == "GET" && path == "/windows") { RouteWindowList(client); return; }
+            if (method == "POST" && path == "/window/snap") { RouteWindowSnap(client, body); return; }
 
             SendText(client, 404, "{\"error\":\"not found\"}", "application/json");
         }
@@ -324,6 +326,23 @@ namespace CustomLLMAPI
         {
             float size = ParseFloat(body, "size", 1f);
             string json = MainThread(() => StatusJson(_actions.SetAvatarSize(size)));
+            SendText(client, 200, json, "application/json");
+        }
+
+        private void RouteWindowList(Socket client)
+        {
+            string json = MainThread(() =>
+            {
+                var list = _actions.GetWindowList();
+                return "[" + string.Join(",", list.ConvertAll(t => "\"" + t.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\"")) + "]";
+            });
+            SendText(client, 200, json, "application/json");
+        }
+
+        private void RouteWindowSnap(Socket client, string body)
+        {
+            string title = ParseString(body, "title", "");
+            string json = MainThread(() => StatusJson(_actions.SnapToWindow(title)));
             SendText(client, 200, json, "application/json");
         }
 

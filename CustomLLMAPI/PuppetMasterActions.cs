@@ -2,6 +2,8 @@
 using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading.Tasks;
 using UnityEngine;
@@ -287,6 +289,168 @@ namespace CustomLLMAPI
             }
             return "ERROR: param not found";
         }
+
+        // ── Window Sit ───────────────────────────────────────────────────
+
+        [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+        [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr hWnd);
+        [DllImport("user32.dll")] private static extern int GetWindowTextLength(IntPtr hWnd);
+        [DllImport("user32.dll", CharSet = CharSet.Auto)] private static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int count);
+        [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr hWnd, out WinRect rect);
+        [DllImport("user32.dll", CharSet = CharSet.Auto)] private static extern IntPtr FindWindow(string lpClassName, string lpWindowName);
+        private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct WinRect { public int Left, Top, Right, Bottom; }
+
+        /// <summary>Returns visible, titled, reasonably-sized top-level window titles.</summary>
+        public List<string> GetWindowList()
+        {
+            var result = new List<string>();
+            EnumWindows((hWnd, _) =>
+            {
+                if (!IsWindowVisible(hWnd)) return true;
+                int len = GetWindowTextLength(hWnd);
+                if (len == 0) return true;
+                if (!GetWindowRect(hWnd, out WinRect r)) return true;
+                if ((r.Right - r.Left) < 200 || (r.Bottom - r.Top) < 60) return true;
+                var sb = new StringBuilder(len + 1);
+                GetWindowText(hWnd, sb, sb.Capacity);
+                string title = sb.ToString();
+                if (!string.IsNullOrEmpty(title))
+                    result.Add(title);
+                return true;
+            }, IntPtr.Zero);
+            return result;
+        }
+
+        /// <summary>
+        /// Snaps the pet to sit on the window matching <paramref name="windowTitle"/>.
+        /// Enables window sitting in SaveData, then drives AvatarWindowHandler via reflection.
+        /// </summary>
+        public string SnapToWindow(string windowTitle)
+        {
+            if (string.IsNullOrEmpty(windowTitle)) return "ERROR: no title";
+
+            IntPtr targetHwnd = FindWindow(null, windowTitle);
+            if (targetHwnd == IntPtr.Zero) return "ERROR: window not found";
+            if (!GetWindowRect(targetHwnd, out WinRect tr)) return "ERROR: could not get window rect";
+
+            if (SaveLoadHandler.Instance?.data != null)
+                SaveLoadHandler.Instance.data.enableWindowSitting = true;
+
+            var handler = FindAnyObjectByType<AvatarWindowHandler>();
+            if (handler == null) return "ERROR: AvatarWindowHandler not found";
+
+            var type = typeof(AvatarWindowHandler);
+            var priv = BindingFlags.NonPublic | BindingFlags.Instance;
+            var pub = BindingFlags.Public | BindingFlags.Instance;
+
+            var animatorField = type.GetField("animator", priv);
+            var snappedField = type.GetField("snappedHWND", priv);
+            var fracField = type.GetField("snapFraction", priv);
+            var guardField = type.GetField("_guard", priv);
+            var latchField = type.GetField("_latch", priv);
+            var smoothField = type.GetField("_snapSmoothingActive", priv);
+            var velXField = type.GetField("_snapVelX", priv);
+            var velYField = type.GetField("_snapVelY", priv);
+            var prevRectField = type.GetField("_havePrevSnapRect", priv);
+            var lastSnapYField = type.GetField("_lastSnapTopY", priv);
+            var recentUnsnapField = type.GetField("_recentUnsnap", priv);
+            var guardZoneField = type.GetField("_guardZoneActive", priv);
+            var settleFrames = type.GetField("_postSettleFrames", priv);
+            var settleRecalib = type.GetField("_postSettleRecalib", priv);
+            var nextEnumField = type.GetField("_nextEnumTime", priv);
+            var wasSittingField = type.GetField("wasSitting", priv);
+            var seatCalibratedField = type.GetField("seatCalibrated", priv);
+
+            var updateCached = type.GetMethod("UpdateCachedWindows", priv);
+            var rebuildOccluders = type.GetMethod("RebuildActiveOccluders", priv);
+            var updateOccluders = type.GetMethod("UpdateOccluderQuadsFrameSync", priv);
+            var setTopMost = type.GetMethod("SetTopMost", priv);
+            var pinToTarget = type.GetMethod("PinToTarget", priv);
+
+            if (animatorField == null || snappedField == null)
+                return "ERROR: reflection failed";
+
+            var animator = animatorField.GetValue(handler) as Animator;
+            if (animator == null) return "ERROR: animator not resolved";
+
+            // Populate cachedWindows NOW so Update()'s validation check finds the window
+            updateCached?.Invoke(handler, null);
+            nextEnumField?.SetValue(handler, Time.unscaledTime + 1f);
+
+            snappedField.SetValue(handler, targetHwnd);
+            guardZoneField?.SetValue(handler, false);
+
+            // Reset wasSitting so Update() fires the WindowSitIndex assignment
+            wasSittingField?.SetValue(handler, false);
+            seatCalibratedField?.SetValue(handler, false);
+
+            animator.SetBool("isWindowSit", true);
+            animator.SetBool("isTaskbarSit", false);
+            animator.Update(0f);
+
+            settleFrames?.SetValue(handler, 1);
+            settleRecalib?.SetValue(handler, true);
+            fracField?.SetValue(handler, 0.5f);
+            lastSnapYField?.SetValue(handler, tr.Top);
+            recentUnsnapField?.SetValue(handler, false);
+
+            int snapGuard = (int?)type.GetField("snapGuardFrames", pub)?.GetValue(handler) ?? 8;
+            int snapLatch = (int?)type.GetField("snapLatchFrames", pub)?.GetValue(handler) ?? 18;
+            guardField?.SetValue(handler, Mathf.Max(1, snapGuard));
+            latchField?.SetValue(handler, Mathf.Max(1, snapLatch));
+
+            bool enableSmooth = (bool?)type.GetField("enableSnapSmoothing", pub)?.GetValue(handler) ?? false;
+            smoothField?.SetValue(handler, enableSmooth);
+            velXField?.SetValue(handler, 0f);
+            velYField?.SetValue(handler, 0f);
+            prevRectField?.SetValue(handler, false);
+
+            setTopMost?.Invoke(handler, new object[] { true });
+            rebuildOccluders?.Invoke(handler, null);
+
+            var rectType = type.GetNestedType("RECT", BindingFlags.NonPublic | BindingFlags.Public);
+            if (rectType != null && pinToTarget != null)
+            {
+                var rect = Activator.CreateInstance(rectType);
+                rectType.GetField("Left")?.SetValue(rect, tr.Left);
+                rectType.GetField("Top")?.SetValue(rect, tr.Top);
+                rectType.GetField("Right")?.SetValue(rect, tr.Right);
+                rectType.GetField("Bottom")?.SetValue(rect, tr.Bottom);
+                pinToTarget.Invoke(handler, new object[] { rect });
+            }
+
+            StartCoroutine(PulseDraggingForSnap());
+            return "ok";
+        }
+
+        private IEnumerator PulseDraggingForSnap()
+        {
+            var ctrl = FindAnyObjectByType<AvatarAnimatorController>();
+            if (ctrl == null) { Debug.Log("[PuppetMaster] AvatarAnimatorController not found"); yield break; }
+
+            var animator = ctrl.animator;
+
+            // Set both the public field and the animator bool — same as SetDragging() does
+            ctrl.isDragging = true;
+            animator.SetBool("isDragging", true);
+
+            Debug.Log("[PuppetMaster] Pulse start — isDragging: " + ctrl.isDragging
+                + " | isWindowSit: " + animator.GetBool("isWindowSit")
+                + " | state: " + animator.GetCurrentAnimatorStateInfo(0).IsName("Idle"));
+
+            for (int i = 0; i < 30; i++)
+                yield return null;
+
+            ctrl.isDragging = false;
+            animator.SetBool("isDragging", false);
+
+            Debug.Log("[PuppetMaster] Pulse end — state is now Idle: "
+                + animator.GetCurrentAnimatorStateInfo(0).IsName("Idle"));
+        }
+
 
         // ── Head pat ──────────────────────────────────────────────────────────
 

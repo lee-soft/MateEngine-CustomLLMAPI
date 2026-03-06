@@ -127,6 +127,21 @@ button.pink    { background: #ec4899; color: #fff; }
     </div>
   </div>
 
+
+<div class='card'>
+  <h2>Window Sit</h2>
+  <div style='display:flex;gap:8px;margin-bottom:10px;'>
+    <select id='windowSelect' style='flex:1;background:#0d0d1a;border:1px solid #2d2d5e;border-radius:8px;padding:10px 12px;color:#e0e0e0;font-size:0.9em;outline:none;'>
+      <option value=''>Loading windows...</option>
+    </select>
+    <button class='neutral' onclick='loadWindows()' title='Refresh window list' style='flex:0 0 auto;padding:10px 14px;'>&#8635;</button>
+  </div>
+  <div class='btn-grid cols-1'>
+    <button class='primary' onclick='snapToWindow()'>&#128188; Snap to Window</button>
+  </div>
+  <div id='snapStatus' style='margin-top:8px;font-size:0.8em;color:#6b7280;min-height:1.2em;'></div>
+</div>
+
 </main>
 <div id='status-bar'>Connecting...</div>
 
@@ -338,7 +353,51 @@ function flash(color) {
   setTimeout(function() { dot.style.background = ''; }, 400);
 }
 
-setTimeout(function() { loadMoods(); }, 2000);
+
+function loadWindows() {
+  api('GET', '/windows', null)
+    .then(function(list) {
+      var sel = document.getElementById('windowSelect');
+      sel.innerHTML = '';
+      if (!list || list.length === 0) {
+        var opt = document.createElement('option');
+        opt.value = '';
+        opt.textContent = 'No windows found';
+        sel.appendChild(opt);
+        return;
+      }
+      list.forEach(function(title) {
+        var opt = document.createElement('option');
+        opt.value = title;
+        opt.textContent = title;
+        sel.appendChild(opt);
+      });
+    })
+    .catch(setDisconnected);
+}
+
+function snapToWindow() {
+  var title = document.getElementById('windowSelect').value;
+  var statusEl = document.getElementById('snapStatus');
+  if (!title) { statusEl.textContent = 'Select a window first.'; statusEl.style.color = '#f87171'; return; }
+  statusEl.textContent = 'Snapping...';
+  statusEl.style.color = '#6b7280';
+  api('POST', '/window/snap', { title: title })
+    .then(function(d) {
+      if (d.status === 'ok') {
+        statusEl.textContent = 'Snapped to: ' + title;
+        statusEl.style.color = '#4ade80';
+        flash('#4ade80');
+      } else {
+        statusEl.textContent = d.status;
+        statusEl.style.color = '#f87171';
+        flash('#f87171');
+      }
+    })
+    .catch(function() { statusEl.textContent = 'Request failed.'; statusEl.style.color = '#f87171'; setDisconnected(); });
+}
+
+setTimeout(function() { loadMoods(); loadWindows(); }, 2000);
 loadAnimations();
 refreshStatus();
 setInterval(refreshStatus, 3000);
