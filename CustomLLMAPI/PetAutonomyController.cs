@@ -8,6 +8,7 @@ using Newtonsoft.Json;
 using UnityEngine;
 using CustomLLMAPI;
 using LLMUnity;
+using CustomLLMAPI.PuppetMaster;
 
 /// <summary>
 /// PetAutonomyController — drives the pet's autonomous behaviour via a remote LLM.

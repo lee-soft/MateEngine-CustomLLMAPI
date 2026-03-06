@@ -8,7 +8,7 @@ using System.Text;
 using System.Threading.Tasks;
 using UnityEngine;
 
-namespace CustomLLMAPI
+namespace CustomLLMAPI.PuppetMaster
 {
     /// <summary>
     /// PuppetMasterActions — pure avatar control surface.
