@@ -541,27 +541,27 @@ namespace CustomLLMAPI
             var pub = BindingFlags.Public | BindingFlags.Instance;
 
             var calibrate = type.GetMethod("CalibrateSeatAnchorToDesktopY", priv);
+            var computeSeat = type.GetMethod("ComputeSeatDesktop", priv);
+            var pinToTarget = type.GetMethod("PinToTarget", priv);
+            var setTopMost = type.GetMethod("SetTopMost", priv);
+            var fracField = type.GetField("snapFraction", priv);
             var settleFrames = type.GetField("_postSettleFrames", priv);
             var settleRecalib = type.GetField("_postSettleRecalib", priv);
-            var fracField = type.GetField("snapFraction", priv);
-            var pinToTarget = type.GetMethod("PinToTarget", priv);
 
-            // Phase 1: start drag, wait for animator to settle into drag pose
+            // Phase 1: start drag, wait for animator to blend into drag pose
             ctrl.isDragging = true;
             ctrl.animator.SetBool("isDragging", true);
 
-            // Wait a few frames for the drag animation to fully blend in
-            for (int i = 0; i < 30; i++)
+            for (int i = 0; i < 15; i++)
                 yield return null;
 
             // Phase 2: bones are now in drag pose — calibrate seat anchor
             if (GetWindowRect(targetHwnd, out WinRect tr))
             {
                 float seatOffsetPx = (float?)type.GetField("seatOffsetPx", pub)?.GetValue(handler) ?? 0f;
-                calibrate?.Invoke(handler, new object[] { (float)(tr.Top + seatOffsetPx + 20f) });
+                calibrate?.Invoke(handler, new object[] { (float)(tr.Top + seatOffsetPx) });
 
-                // Recalculate snap fraction now that seat is calibrated
-                var computeSeat = type.GetMethod("ComputeSeatDesktop", priv);
+                // Recalculate snap fraction with 30px edge margin
                 if (computeSeat != null)
                 {
                     var args = new object[] { 0f, 0f };
@@ -569,15 +569,24 @@ namespace CustomLLMAPI
                     if (ok)
                     {
                         float px2 = (float)args[0];
-                        float w = Mathf.Max(1, tr.Right - tr.Left);
-                        fracField?.SetValue(handler, Mathf.Clamp01((px2 - tr.Left) / w));
+                        float winW = Mathf.Max(1, tr.Right - tr.Left);
+                        float margin = 30f / winW;
+                        fracField?.SetValue(handler, Mathf.Clamp(
+                            (px2 - tr.Left) / winW,
+                            margin,
+                            1f - margin));
+                    }
+                    else
+                    {
+                        // Fallback: centre with margin
+                        fracField?.SetValue(handler, 0.5f);
                     }
                 }
 
                 settleFrames?.SetValue(handler, 0);
                 settleRecalib?.SetValue(handler, false);
 
-                // Pin immediately with calibrated position
+                // Pin with calibrated position
                 var rectType = type.GetNestedType("RECT", BindingFlags.NonPublic | BindingFlags.Public);
                 if (rectType != null && pinToTarget != null)
                 {
@@ -590,13 +599,17 @@ namespace CustomLLMAPI
                 }
             }
 
-            // Phase 3: hold drag for remaining frames so animator completes transition
-            for (int i = 0; i < 22; i++)
+            // Phase 3: hold drag so animator completes sit transition
+            for (int i = 0; i < 20; i++)
                 yield return null;
 
             ctrl.isDragging = false;
             ctrl.animator.SetBool("isDragging", false);
+
+            // Set topmost WITHOUT stealing focus after everything settles
+            setTopMost?.Invoke(handler, new object[] { true });
         }
+
         // ── Head pat ──────────────────────────────────────────────────────────
 
         public string Headpat()
