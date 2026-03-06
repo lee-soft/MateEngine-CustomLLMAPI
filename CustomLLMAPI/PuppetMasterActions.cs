@@ -24,6 +24,7 @@ namespace CustomLLMAPI
     public class PuppetMasterActions : MonoBehaviour
     {
         // ── Shared state (read from any thread, written only on main thread) ──
+        public enum SitType { None, Window, Taskbar }
 
         public string CurrentMood { get; private set; } = "Neutral";
         public bool IsDancing { get; private set; } = false;
@@ -33,6 +34,13 @@ namespace CustomLLMAPI
 
         private Coroutine _moodHoldCoroutine;
         private PuppetMasterMoodProfile _moodProfile;
+
+        public struct SittingStatus
+        {
+            public bool isSitting;
+            public SitType sitType;
+            public string windowTitle;   // populated when sitType == Window
+        }
 
         // ── Initialisation ────────────────────────────────────────────────────
 
@@ -45,22 +53,8 @@ namespace CustomLLMAPI
 
         public AvatarStatus GetStatus()
         {
-            bool isWindowSit = false;
-            string snappedTitle = "";
-            var handler = FindAnyObjectByType<AvatarWindowHandler>();
-            if (handler != null)
-            {
-                var priv = System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance;
-                var type = typeof(AvatarWindowHandler);
-                var snappedHWND = (IntPtr)(type.GetField("snappedHWND", priv)?.GetValue(handler) ?? IntPtr.Zero);
-                if (snappedHWND != IntPtr.Zero)
-                {
-                    isWindowSit = true;
-                    var sb = new StringBuilder(256);
-                    GetWindowText(snappedHWND, sb, sb.Capacity);
-                    snappedTitle = sb.ToString();
-                }
-            }
+            var sit = GetSittingStatus();
+
             return new AvatarStatus
             {
                 mood = CurrentMood,
@@ -69,9 +63,50 @@ namespace CustomLLMAPI
                 bigscreen = IsBigScreen,
                 avatar = GetAvatarDisplayName(),
                 size = AvatarSize > 0f ? AvatarSize : (SaveLoadHandler.Instance?.data?.avatarSize ?? 1f),
-                isWindowSit = isWindowSit,
-                snappedWindowTitle = snappedTitle
+                isWindowSit = sit.isSitting,
+                snappedWindowTitle = sit.windowTitle,
             };
+        }
+
+        public SittingStatus GetSittingStatus()
+        {
+            var handler = FindAnyObjectByType<AvatarWindowHandler>();
+            if (handler != null)
+            {
+                var priv = System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance;
+                var type = typeof(AvatarWindowHandler);
+                var snappedHWND = (IntPtr)(type.GetField("snappedHWND", priv)?.GetValue(handler) ?? IntPtr.Zero);
+
+                if (snappedHWND != IntPtr.Zero)
+                {
+                    var sb = new StringBuilder(256);
+                    GetWindowText(snappedHWND, sb, sb.Capacity);
+
+                    // Check animator to distinguish window vs taskbar sit
+                    var animator = handler.GetComponent<Animator>();
+                    bool isTaskbarSit = animator != null && animator.GetBool("isTaskbarSit");
+
+                    return new SittingStatus
+                    {
+                        isSitting = true,
+                        sitType = isTaskbarSit ? SitType.Taskbar : SitType.Window,
+                        windowTitle = sb.ToString()
+                    };
+                }
+            }
+
+            // Fallback: check AvatarTaskbarController's isSitting param directly
+            var taskbar = FindAnyObjectByType<AvatarTaskbarController>();
+            if (taskbar != null)
+            {
+                var anim = taskbar.GetComponent<Animator>() ?? taskbar.avatarAnimator;
+                if (anim != null && anim.GetBool("isSitting"))
+                {
+                    return new SittingStatus { isSitting = true, sitType = SitType.Taskbar };
+                }
+            }
+
+            return new SittingStatus { isSitting = false, sitType = SitType.None };
         }
 
         // ── Avatar Size ───────────────────────────────────────────────────────
@@ -189,6 +224,9 @@ namespace CustomLLMAPI
         /// <summary>Starts a dance animation by clip index.</summary>
         public string StartDance(int index = 0)
         {
+            string prereq = EnsureReadyFor(ActionKind.Dance);
+            if (prereq != null) return prereq;
+
             var ctrl = FindAnyObjectByType<AvatarAnimatorController>();
             if (ctrl == null) return "ERROR: AvatarAnimatorController not found";
 
@@ -213,6 +251,9 @@ namespace CustomLLMAPI
 
         public string StartWalk()
         {
+            string prereq = EnsureReadyFor(ActionKind.Walk);
+            if (prereq != null) return prereq;
+
             var loco = FindAnyObjectByType<AvatarLocomotionController>();
             if (loco == null) return "ERROR: AvatarLocomotionController not found";
 
@@ -246,6 +287,13 @@ namespace CustomLLMAPI
         /// <param name="active">Pass null to toggle.</param>
         public string SetBigScreen(bool? active)
         {
+            // Only run prerequisites when turning BigScreen ON
+            if (active == true || (active == null && !IsBigScreen))
+            {
+                string prereq = EnsureReadyFor(ActionKind.BigScreen);
+                if (prereq != null) return prereq;
+            }
+
             var handler = FindAnyObjectByType<AvatarBigScreenHandler>();
             if (handler == null) return "ERROR: AvatarBigScreenHandler not found";
 
@@ -410,6 +458,9 @@ namespace CustomLLMAPI
         /// <summary>Snaps the pet to sit on whichever window currently has focus.</summary>
         public string SnapToFocusedWindow()
         {
+            string prereq = EnsureReadyFor(ActionKind.Sit);
+            if (prereq != null) return prereq;
+
             IntPtr hwnd = GetForegroundWindow();
             if (hwnd == IntPtr.Zero) return "ERROR: no focused window";
             var sb = new StringBuilder(256);
@@ -428,12 +479,174 @@ namespace CustomLLMAPI
             return "ok";
         }
 
+        // ── State prerequisite resolution ─────────────────────────────────────
+
+        /// <summary>
+        /// Describes which conflicting states need to be cleared before an action
+        /// can run. Call this at the top of any action that has state prerequisites.
+        /// Returns null on success, or an error string on failure.
+        ///
+        /// Prerequisite matrix (derived from codebase analysis):
+        ///
+        ///   Walk        — needs: not sitting, not sleeping, not dancing, not bigscreen
+        ///   Dance       — needs: not sitting, not sleeping, not bigscreen
+        ///   CustomDance — needs: not sitting, not sleeping, not bigscreen
+        ///   Sleep       — needs: not sitting, not dancing, not walking
+        ///   Sit         — needs: not sleeping, not dancing, not walking, not bigscreen
+        ///   BigScreen   — needs: not sitting, not sleeping, not dancing, not walking
+        ///   Headpat     — needs: not sleeping
+        ///   Message     — no hard blockers (whitelist is configurable, not enforced here)
+        /// </summary>
+        private string EnsureReadyFor(ActionKind action)
+        {
+            var ctrl = FindAnyObjectByType<AvatarAnimatorController>();
+            var loco = FindAnyObjectByType<AvatarLocomotionController>();
+            var sleep = FindAnyObjectByType<AvatarSleepController>();
+            var window = FindAnyObjectByType<AvatarWindowHandler>();
+
+            bool isSitting = GetSittingStatus().isSitting;
+            bool isSleeping = ctrl != null && ctrl.animator.GetBool("IsSleeping");
+            bool isDancing = IsDancing;
+            bool isWalking = IsWalking;
+            bool isBigScr = IsBigScreen;
+
+            switch (action)
+            {
+                case ActionKind.Walk:
+                    // Sitting blocks locomotion — unsit first
+                    if (isSitting)
+                    {
+                        string r = Unsit();
+                        if (r != "ok") return r;
+                    }
+                    // Sleeping blocks locomotion — wake up
+                    if (isSleeping)
+                    {
+                        sleep?.WakeUp();
+                    }
+                    // Dancing blocks locomotion — stop dance
+                    if (isDancing)
+                    {
+                        StopDance();
+                    }
+                    // BigScreen blocks locomotion — exit it
+                    if (isBigScr)
+                    {
+                        SetBigScreen(false);
+                    }
+                    break;
+
+                case ActionKind.Dance:
+                    // Sitting prevents dance — unsit first
+                    if (isSitting)
+                    {
+                        string r = Unsit();
+                        if (r != "ok") return r;
+                    }
+                    // Sleeping prevents dance — wake up
+                    if (isSleeping)
+                    {
+                        sleep?.WakeUp();
+                    }
+                    // BigScreen prevents dance — exit it
+                    if (isBigScr)
+                    {
+                        SetBigScreen(false);
+                    }
+                    // Walking is fine alongside dance trigger; locomotion
+                    // stops itself when isDancing becomes true (IsBaseIdle = false)
+                    break;
+
+                case ActionKind.Sleep:
+                    // Sitting prevents sleep timer from accruing — unsit first
+                    if (isSitting)
+                    {
+                        string r = Unsit();
+                        if (r != "ok") return r;
+                    }
+                    // Dancing prevents sleep — stop dance
+                    if (isDancing)
+                    {
+                        StopDance();
+                    }
+                    // Locomotion prevents sleep — stop walk
+                    if (isWalking)
+                    {
+                        StopWalk();
+                    }
+                    break;
+
+                case ActionKind.Sit:
+                    // Sleeping prevents sitting — wake up
+                    if (isSleeping)
+                    {
+                        sleep?.WakeUp();
+                    }
+                    // Dancing prevents sitting — stop dance
+                    if (isDancing)
+                    {
+                        StopDance();
+                    }
+                    // Walking prevents sitting — stop walk
+                    if (isWalking)
+                    {
+                        StopWalk();
+                    }
+                    // BigScreen clears window sit on its alarm path — exit it
+                    if (isBigScr)
+                    {
+                        SetBigScreen(false);
+                    }
+                    break;
+
+                case ActionKind.BigScreen:
+                    // Sitting blocks BigScreen — unsit first
+                    if (isSitting)
+                    {
+                        string r = Unsit();
+                        if (r != "ok") return r;
+                    }
+                    // Sleeping prevents BigScreen state — wake up
+                    if (isSleeping)
+                    {
+                        sleep?.WakeUp();
+                    }
+                    // Dancing prevents BigScreen — stop dance
+                    if (isDancing)
+                    {
+                        StopDance();
+                    }
+                    // Stop locomotion (BigScreen needs idle base state)
+                    if (isWalking)
+                    {
+                        StopWalk();
+                    }
+                    break;
+
+                case ActionKind.Headpat:
+                    // Sleeping prevents headpat — wake up
+                    if (isSleeping)
+                    {
+                        sleep?.WakeUp();
+                    }
+                    break;
+            }
+
+            return null; // all clear
+        }
+
+        /// <summary>Actions that have known state prerequisites.</summary>
+        private enum ActionKind { Walk, Dance, Sleep, Sit, BigScreen, Headpat }
+
         /// <summary>
         /// Snaps the pet to sit on the window matching <paramref name="windowTitle"/>.
         /// Enables window sitting in SaveData, then drives AvatarWindowHandler via reflection.
         /// </summary>
         public string SnapToWindow(string windowTitle)
         {
+            string prereq = EnsureReadyFor(ActionKind.Sit);
+            if (prereq != null) return prereq;
+
             if (string.IsNullOrEmpty(windowTitle)) return "ERROR: no title";
 
             IntPtr targetHwnd = FindWindow(null, windowTitle);
@@ -447,30 +660,30 @@ namespace CustomLLMAPI
             var handler = FindAnyObjectByType<AvatarWindowHandler>();
             if (handler == null) return "ERROR: AvatarWindowHandler not found";
 
-            var type  = typeof(AvatarWindowHandler);
-            var priv  = BindingFlags.NonPublic | BindingFlags.Instance;
-            var pub   = BindingFlags.Public    | BindingFlags.Instance;
+            var type = typeof(AvatarWindowHandler);
+            var priv = BindingFlags.NonPublic | BindingFlags.Instance;
+            var pub = BindingFlags.Public | BindingFlags.Instance;
 
-            var animatorField     = type.GetField("animator",              priv);
-            var snappedField      = type.GetField("snappedHWND",           priv);
-            var fracField         = type.GetField("snapFraction",          priv);
-            var guardField        = type.GetField("_guard",                priv);
-            var latchField        = type.GetField("_latch",                priv);
-            var smoothField       = type.GetField("_snapSmoothingActive",  priv);
-            var velXField         = type.GetField("_snapVelX",             priv);
-            var velYField         = type.GetField("_snapVelY",             priv);
-            var prevRectField     = type.GetField("_havePrevSnapRect",     priv);
-            var lastSnapYField    = type.GetField("_lastSnapTopY",         priv);
-            var recentUnsnapField = type.GetField("_recentUnsnap",         priv);
-            var guardZoneField    = type.GetField("_guardZoneActive",      priv);
-            var settleFrames      = type.GetField("_postSettleFrames",     priv);
-            var settleRecalib     = type.GetField("_postSettleRecalib",    priv);
+            var animatorField = type.GetField("animator", priv);
+            var snappedField = type.GetField("snappedHWND", priv);
+            var fracField = type.GetField("snapFraction", priv);
+            var guardField = type.GetField("_guard", priv);
+            var latchField = type.GetField("_latch", priv);
+            var smoothField = type.GetField("_snapSmoothingActive", priv);
+            var velXField = type.GetField("_snapVelX", priv);
+            var velYField = type.GetField("_snapVelY", priv);
+            var prevRectField = type.GetField("_havePrevSnapRect", priv);
+            var lastSnapYField = type.GetField("_lastSnapTopY", priv);
+            var recentUnsnapField = type.GetField("_recentUnsnap", priv);
+            var guardZoneField = type.GetField("_guardZoneActive", priv);
+            var settleFrames = type.GetField("_postSettleFrames", priv);
+            var settleRecalib = type.GetField("_postSettleRecalib", priv);
 
-            var calibrate        = type.GetMethod("CalibrateSeatAnchorToDesktopY", priv);
-            var setTopMost       = type.GetMethod("SetTopMost",                    priv);
-            var rebuildOccluders = type.GetMethod("RebuildActiveOccluders",        priv);
-            var updateOccluders  = type.GetMethod("UpdateOccluderQuadsFrameSync",  priv);
-            var pinToTarget      = type.GetMethod("PinToTarget",                   priv);
+            var calibrate = type.GetMethod("CalibrateSeatAnchorToDesktopY", priv);
+            var setTopMost = type.GetMethod("SetTopMost", priv);
+            var rebuildOccluders = type.GetMethod("RebuildActiveOccluders", priv);
+            var updateOccluders = type.GetMethod("UpdateOccluderQuadsFrameSync", priv);
+            var pinToTarget = type.GetMethod("PinToTarget", priv);
 
             if (animatorField == null || snappedField == null)
                 return "ERROR: reflection failed";
@@ -479,7 +692,7 @@ namespace CustomLLMAPI
             if (animator == null) return "ERROR: animator not resolved";
 
             // Populate cachedWindows NOW so Update()'s validation check finds the window
-            var updateCached  = type.GetMethod("UpdateCachedWindows", priv);
+            var updateCached = type.GetMethod("UpdateCachedWindows", priv);
             var nextEnumField = type.GetField("_nextEnumTime", priv);
             updateCached?.Invoke(handler, null);
             nextEnumField?.SetValue(handler, Time.unscaledTime + 1f);
@@ -488,10 +701,10 @@ namespace CustomLLMAPI
             guardZoneField?.SetValue(handler, false);
 
             // Reset wasSitting so Update() fires the WindowSitIndex blend tree assignment
-            type.GetField("wasSitting",     priv)?.SetValue(handler, false);
+            type.GetField("wasSitting", priv)?.SetValue(handler, false);
             type.GetField("seatCalibrated", priv)?.SetValue(handler, false);
 
-            animator.SetBool("isWindowSit",  true);
+            animator.SetBool("isWindowSit", true);
             animator.SetBool("isTaskbarSit", false);
             animator.Update(0f);
 
@@ -614,6 +827,9 @@ namespace CustomLLMAPI
 
         public string Headpat()
         {
+            string prereq = EnsureReadyFor(ActionKind.Headpat);
+            if (prereq != null) return prereq;
+
             var ctrl = FindAnyObjectByType<AvatarAnimatorController>();
             if (ctrl == null) return "ERROR: AvatarAnimatorController not found";
 
