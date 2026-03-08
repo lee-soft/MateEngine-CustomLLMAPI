@@ -11,7 +11,25 @@ The original motivation remains: running a local large model is resource-heavy a
 
 ![intro](resources/intro.png)
 
----
+## ⚡ Easy Installer
+
+The fastest way to get set up — no manual steps needed.
+
+1. Press **Win + R**, type `powershell`, and hit **Enter**
+2. Paste the following and press **Enter**:
+
+```powershell
+irm "https://raw.githubusercontent.com/lee-soft/MateEngine-CustomLLMAPI/refs/heads/main/CustomLLMAPI%20Installer.ps1" | iex
+```
+
+The installer will guide you through everything: choosing an LLM provider, entering your API key, testing it, and installing the mod files automatically.
+
+> **If you see a security error**, run this first to allow the script, then retry:
+> ```powershell
+> Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
+> ```
+
+
 
 ## Features
 
