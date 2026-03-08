@@ -11,8 +11,6 @@ The original motivation remains: running a local large model is resource-heavy a
 
 ![intro](resources/intro.png)
 
----
-
 ## Features
 
 ### 🔌 Remote LLM Proxy
