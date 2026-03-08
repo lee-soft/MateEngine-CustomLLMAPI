@@ -479,49 +479,29 @@ if (-not (Test-Path $jsonPath)) {
         $json.names = $namesList.ToArray()
         $json.types = $typesList.ToArray()
 
-        $json | ConvertTo-Json -Depth 10 | Set-Content -Path $jsonPath -Encoding UTF8
+        [System.IO.File]::WriteAllText($jsonPath, ($json | ConvertTo-Json -Depth 10), (New-Object System.Text.UTF8Encoding $false))
         Write-OK "ScriptingAssemblies.json patched successfully."
     }
 }
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# STEP 9 — Guide user to install .me file via MateEngine UI
+# STEP 9 — Install the Mod Settings UI
 # ══════════════════════════════════════════════════════════════════════════════
-Write-Header "STEP 9 — Install the Mod Settings UI"
+Write-Header "STEP 9 — Installing Mod Settings UI"
 
-Write-Host @"
+$modsDir = [System.IO.Path]::GetFullPath(
+    [System.IO.Path]::Combine($env:APPDATA, "..", "LocalLow", "Shinymoon", "MateEngineX", "Mods")
+)
 
-  Almost done! One last step needs to be done inside MateEngine itself.
+if (-not (Test-Path $modsDir)) {
+    New-Item -ItemType Directory -Path $modsDir -Force | Out-Null
+    Write-OK "Created Mods folder."
+}
 
-  The file  CustomLLMAPI.me  is the mod's settings panel UI. It must be
-  installed through MateEngine's built-in mod manager.
-
-  Here's what to do:
-  ──────────────────────────────────────────────────────────────────
-   1. Open MateEngine normally.
-   2. Click on your pet to bring up the menu.
-   3. Go to  Mods  (or Mod Manager) in the menu.
-   4. Click  "Install Mod"  (or the  +  button).
-   5. Browse to this file and select it:
-
-"@ -ForegroundColor White
-
-Write-Host "      $meDest" -ForegroundColor Yellow
-
-Write-Host @"
-
-   6. Confirm the installation inside MateEngine.
-  ──────────────────────────────────────────────────────────────────
-
-  We've opened the folder for you so you can find the file easily.
-
-"@ -ForegroundColor White
-
-# Open the temp folder in Explorer for convenience
-Start-Process "explorer.exe" -ArgumentList $tempDir
-
-Pause-Enter "Press ENTER once you have installed CustomLLMAPI.me in MateEngine..."
+Copy-Item -Path $meDest -Destination (Join-Path $modsDir "CustomLLMAPI.me") -Force
+Write-OK "Mod UI installed to:"
+Write-Info "  $modsDir\CustomLLMAPI.me"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -537,7 +517,7 @@ Write-Host @"
     ✔  Config saved : $configFile
     ✔  DLL installed: $managedDir\CustomLLMAPI.dll
     ✔  JSON patched : $jsonPath
-    ✔  .me UI file  : installed via MateEngine Mod Manager
+    ✔  .me UI file  : $modsDir\CustomLLMAPI.me"
 
   You can now open MateEngine. Your desktop pet will use $($provider.Name)
   for its chat responses instead of the built-in local model.
